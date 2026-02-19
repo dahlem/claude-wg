@@ -2,18 +2,33 @@
 
 ## Usage
 ```
-/wg-sync
+/wg-sync [channel] [thread-ts]
 ```
 
-No arguments. Operates on the plan thread linked to the current session
-(stored in `.claude/wg_session.json` in the project directory).
+Syncs feedback for a plan thread. Targets are resolved in this order:
+1. `channel` + `thread-ts` arguments → explicit, works for any thread
+2. `channel` argument alone → looks up threads in the global registry owned by you; auto-selects if exactly one, otherwise lists and asks for `thread-ts`
+3. No arguments → falls back to `.claude/wg_session.json` in the project directory
+
+Works from **any Claude session** — no project-local session file required.
 
 ## What to do
 
-1. **Retrieve feedback:**
-   ```bash
-   ~/.claude/wg/venv/bin/python ~/.claude/wg/cli.py sync --session-dir "$PWD"
-   ```
+1. **Resolve the target thread:**
+
+   a. If the user provided `channel` (and optionally `thread-ts`):
+      ```bash
+      ~/.claude/wg/venv/bin/python ~/.claude/wg/cli.py sync \
+        --channel <channel> [--thread-ts <ts>]
+      ```
+
+   b. If no arguments and a session file exists in `$PWD`:
+      ```bash
+      ~/.claude/wg/venv/bin/python ~/.claude/wg/cli.py sync --session-dir "$PWD"
+      ```
+
+   c. If neither works, run `/wg-status <channel>` to list available threads,
+      then ask the user which to target and re-run with `--channel` + `--thread-ts`.
 
 2. **Read the output carefully.** It contains:
    - Channel and thread metadata
@@ -38,11 +53,11 @@ No arguments. Operates on the plan thread linked to the current session
    - Work through the plan revision together
    - Ask: "Which files will this revised plan modify? (Comma-separated paths, or enter to keep the same.)"
    - Write the revised plan to `/tmp/wg_plan.md`
-   - Post the revision:
+   - Post the revision (use `--channel` to avoid session-file dependency):
      ```bash
      ~/.claude/wg/venv/bin/python ~/.claude/wg/cli.py reply \
        --plan-file /tmp/wg_plan.md \
-       --session-dir "$PWD"
+       --channel <channel> [--thread-ts <ts>]
      ```
      Add `--files "path/to/file.py"` if files changed.
    - Confirm: "Plan v<N> posted. Waiting for further feedback."
@@ -52,7 +67,11 @@ No arguments. Operates on the plan thread linked to the current session
    - Suggest running `/wg-close <channel>` if all plans in the channel are done
 
 ## Notes
-- Feedback is stored locally by the daemon. No network call needed to read it.
-- You can run `/wg-sync` as many times as you like — it always shows the
-  current cumulative feedback.
-- Only feedback on YOUR thread (the one linked to this session) is shown.
+- The global registry lives in `~/.claude/wg/channels/` and is maintained by
+  the daemon independently of any working directory or Claude session.
+- `--channel` alone is sufficient when you own exactly one thread in that channel.
+- When you own multiple threads in the same channel, `--thread-ts` is required
+  to disambiguate (the CLI will list your threads and prompt you).
+- The session file (`.claude/wg_session.json`) is a convenience cache — it is
+  written when you create or post a plan, but is never required if you pass
+  `--channel`.

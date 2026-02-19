@@ -39,6 +39,8 @@ from state import (
 
 cfg = load_config()
 client = WebClient(token=cfg["slack_bot_token"])
+
+
 MY_USER_ID: str = cfg["my_slack_user_id"]
 
 ONBOARDING_DM = """\
@@ -171,6 +173,39 @@ def print_conflicts(conflicts: list) -> None:
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
+def _resolve_thread(channel_name: str, thread_ts: str | None) -> tuple[str, str, dict]:
+    """Resolve channel + optional thread_ts to (channel_name, thread_ts, state).
+
+    If thread_ts is omitted, infers the thread from MY_USER_ID ownership.
+    Exits with a helpful message if resolution is ambiguous or impossible.
+    """
+    channel_name = channel_name if channel_name.startswith("wg_") else f"wg_{channel_name}"
+    state = load_channel_state(channel_name)
+    if not state:
+        print(f"No local state for {channel_name}. Run /wg-join to bootstrap it.", file=sys.stderr)
+        sys.exit(1)
+
+    if thread_ts:
+        if thread_ts not in state["threads"]:
+            print(f"Thread {thread_ts} not found in {channel_name}.", file=sys.stderr)
+            sys.exit(1)
+        return channel_name, thread_ts, state
+
+    # Infer by ownership
+    owned = [(ts, t) for ts, t in state["threads"].items() if t.get("owner") == MY_USER_ID]
+    if not owned:
+        print(f"No threads owned by {MY_USER_ID} in #{channel_name}.", file=sys.stderr)
+        sys.exit(1)
+    if len(owned) == 1:
+        return channel_name, owned[0][0], state
+
+    # Multiple owned threads — list them and ask for disambiguation
+    print(f"Multiple threads owned by {MY_USER_ID} in #{channel_name}:", file=sys.stderr)
+    for ts, t in sorted(owned, key=lambda x: float(x[0])):
+        print(f"  {ts}  v{t.get('version', 1)}  status={t.get('status')}", file=sys.stderr)
+    print("Re-run with --thread-ts <ts> to select one.", file=sys.stderr)
+    sys.exit(1)
+
 def cmd_create(args) -> None:
     channel_name = f"wg_{args.channel}"
 
@@ -291,17 +326,24 @@ def cmd_plan(args) -> None:
 
 def cmd_reply(args) -> None:
     """Post a revised plan as a reply in the current session's thread."""
-    session = load_session(args.session_dir or None)
-    if not session:
-        print("No active session. Run /wg or /wg-plan first.", file=sys.stderr)
-        sys.exit(1)
-
-    channel_name = session["channel"]
-    thread_ts = session["thread_ts"]
-    state = load_channel_state(channel_name)
-    if not state:
-        print(f"No state for {channel_name}.", file=sys.stderr)
-        sys.exit(1)
+    if getattr(args, "channel", None):
+        channel_name, thread_ts, state = _resolve_thread(args.channel, getattr(args, "thread_ts", None))
+    else:
+        session = load_session(args.session_dir or None)
+        if not session:
+            print(
+                "No active session found. Pass --channel <name> to target a thread "
+                "from the global registry, or run /wg or /wg-plan to create one.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        channel_name = session["channel"]
+        thread_ts = session["thread_ts"]
+        _state = load_channel_state(channel_name)
+        if not _state:
+            print(f"No state for {channel_name}.", file=sys.stderr)
+            sys.exit(1)
+        state = _state
 
     thread = state["threads"].get(thread_ts, {})
     version = thread.get("version", 1) + 1
@@ -309,11 +351,12 @@ def cmd_reply(args) -> None:
     msg = format_plan_message(plan, version, channel_name)
 
     channel_id = state["channel_id"]
-    slack("chat_postMessage",
-          channel=channel_id,
-          text=msg,
-          thread_ts=thread_ts,
-          mrkdwn=True)
+    res = slack("chat_postMessage",
+                channel=channel_id,
+                text=msg,
+                thread_ts=thread_ts,
+                mrkdwn=True)
+    reply_ts = res["ts"]
 
     # Update files if provided
     files = parse_files(getattr(args, "files", None))
@@ -322,10 +365,11 @@ def cmd_reply(args) -> None:
 
     # Append to plan_versions
     plan_versions = thread.get("plan_versions", [])
-    plan_versions.append({"version": version, "text": plan, "posted_at": now_iso()})
+    plan_versions.append({"version": version, "text": plan, "posted_at": now_iso(), "ts": reply_ts})
     thread["plan_versions"] = plan_versions
 
     thread["version"] = version
+    thread["latest_reply_ts"] = reply_ts
     thread["status"] = "awaiting_feedback"
     state["threads"][thread_ts] = thread
     save_channel_state(channel_name, state)
@@ -335,17 +379,31 @@ def cmd_reply(args) -> None:
 
 def cmd_sync(args) -> None:
     """Print pending feedback for the current session's thread."""
-    session = load_session(args.session_dir or None)
-    if not session:
-        print("No active session found for this directory.", file=sys.stderr)
-        sys.exit(1)
-
-    channel_name = session["channel"]
-    thread_ts = session["thread_ts"]
-    state = load_channel_state(channel_name)
-    if not state:
-        print(f"No state found for {channel_name}.", file=sys.stderr)
-        sys.exit(1)
+    if getattr(args, "channel", None):
+        channel_name, thread_ts, state = _resolve_thread(args.channel, getattr(args, "thread_ts", None))
+    else:
+        session = load_session(args.session_dir or None)
+        if not session:
+            print(
+                "No active session found. Pass --channel <name> to target a thread "
+                "from the global registry, or run /wg or /wg-plan to create one.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        channel_name = session["channel"]
+        thread_ts = session["thread_ts"]
+        _state = load_channel_state(channel_name)
+        if not _state:
+            print(f"No state found for {channel_name}.", file=sys.stderr)
+            sys.exit(1)
+        state = _state
+        if state.get("status") == "closed":
+            print(
+                f"#{channel_name} is archived. Pass --channel <name> to target "
+                "an active channel from the global registry.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     thread = state["threads"].get(thread_ts)
     if not thread:
@@ -583,35 +641,33 @@ def cmd_bootstrap(args) -> None:
 
 def cmd_approve(args) -> None:
     """Mark the current session's plan as approved and add ✅ reaction in Slack."""
-    # Resolve channel and session
-    if hasattr(args, "channel") and args.channel:
-        channel_name = args.channel if args.channel.startswith("wg_") else f"wg_{args.channel}"
-        session = None
+    if getattr(args, "channel", None):
+        channel_name, thread_ts, state = _resolve_thread(args.channel, getattr(args, "thread_ts", None))
     else:
         session = load_session(args.session_dir or None)
         if not session:
-            print("No active session found. Use --channel to specify.", file=sys.stderr)
+            print(
+                "No active session found. Pass --channel <name> to target a thread "
+                "from the global registry, or run /wg or /wg-plan to create one.",
+                file=sys.stderr,
+            )
             sys.exit(1)
         channel_name = session["channel"]
+        thread_ts = session["thread_ts"]
+        _state = load_channel_state(channel_name)
+        if not _state:
+            print(f"No state for {channel_name}.", file=sys.stderr)
+            sys.exit(1)
+        state = _state
+        if state.get("status") == "closed":
+            print(
+                f"#{channel_name} is archived. Pass --channel <name> to target "
+                "an active channel from the global registry.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    state = load_channel_state(channel_name)
-    if not state:
-        print(f"No state for {channel_name}.", file=sys.stderr)
-        sys.exit(1)
-
-    # Find thread owned by MY_USER_ID
-    thread_ts = None
-    thread = None
-    if session:
-        thread_ts = session.get("thread_ts")
-        thread = state["threads"].get(thread_ts)
-    else:
-        for ts, t in state["threads"].items():
-            if t.get("owner") == MY_USER_ID:
-                thread_ts = ts
-                thread = t
-                break
-
+    thread = state["threads"].get(thread_ts)
     if not thread:
         print(f"No thread owned by {MY_USER_ID} found in #{channel_name}.", file=sys.stderr)
         sys.exit(1)
@@ -622,12 +678,13 @@ def cmd_approve(args) -> None:
     state["threads"][thread_ts] = thread
     save_channel_state(channel_name, state)
 
-    # Add ✅ reaction in Slack so collaborators see it
+    # Add ✅ reaction to the latest reply (or top-level if no replies yet)
+    reaction_ts = thread.get("latest_reply_ts", thread_ts)
     try:
         slack("reactions_add",
               channel=state["channel_id"],
               name="white_check_mark",
-              timestamp=thread_ts)
+              timestamp=reaction_ts)
     except Exception as e:
         print(f"Warning: could not add reaction: {e}", file=sys.stderr)
 
@@ -746,10 +803,14 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--plan-text")
     c.add_argument("--session-dir")
     c.add_argument("--files", help="Comma-separated file paths this plan will modify")
+    c.add_argument("--channel", help="Channel name (bypasses session file; infers thread by ownership)")
+    c.add_argument("--thread-ts", help="Thread timestamp (required when you own multiple threads in the channel)")
 
     # sync
     c = sub.add_parser("sync", help="Print feedback for the current session's thread")
     c.add_argument("--session-dir")
+    c.add_argument("--channel", help="Channel name (bypasses session file when used with --thread-ts)")
+    c.add_argument("--thread-ts", help="Thread timestamp (bypasses session file when used with --channel)")
 
     # link
     c = sub.add_parser("link", help="Link session directory to a channel thread")
@@ -773,7 +834,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # approve
     c = sub.add_parser("approve", help="Mark the current session's plan as approved")
-    c.add_argument("--channel", help="Channel name (optional, uses session if omitted)")
+    c.add_argument("--channel", help="Channel name (bypasses session file; infers thread by ownership)")
+    c.add_argument("--thread-ts", help="Thread timestamp (required when you own multiple threads in the channel)")
     c.add_argument("--session-dir")
 
     # list

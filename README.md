@@ -92,12 +92,19 @@ You revise. You post the revision. You get approval. You close.
 - **State lives locally.** Each person's daemon writes to `~/.claude/wg/` on
   their own machine. The Slack channel is the shared medium; local JSON files
   route events to the right Claude session.
-- **Session-to-thread mapping.** When you run `/wg` or `/wg-plan`, the
-  thread timestamp is saved to `<project_dir>/.claude/wg_session.json`.
-  `/wg-sync` reads this to know which thread to pull feedback from.
-  Multiple sessions never share a thread — context stays clean.
+- **Global registry, session file optional.** All channel and thread state
+  lives in `~/.claude/wg/channels/` and is maintained by the daemon
+  independently of any project directory or Claude session. `/wg-sync`,
+  `/wg-approve`, and `/wg-reply` all accept `--channel [--thread-ts]` and
+  work from any Claude session without a project-local session file.
+  The session file (`.claude/wg_session.json`) is written as a convenience
+  when you create or post a plan, but is never required.
+- **Ownership inference.** When you pass `--channel` alone, the CLI looks up
+  threads owned by your user ID in the global registry. If you own exactly
+  one thread in that channel, it is selected automatically. If you own
+  multiple, the CLI lists them and asks for `--thread-ts` to disambiguate.
 - **One thread = one plan.** If you need a second parallel plan in the same
-  channel, open a second Claude session and run `/wg-plan` there.
+  channel, run `/wg-plan` from any Claude session.
 
 ---
 
@@ -177,14 +184,12 @@ The bot token controls what the daemon and CLI are allowed to do in Slack.
    | `im:write` | Open a DM conversation with a collaborator before messaging them |
    | `reactions:read` | Receive ✅ reaction events (collaborator approvals) |
    | `reactions:write` | Add a ✅ reaction on behalf of the bot (owner self-approval) |
-   | `users:read` | Resolve Slack usernames and display names to user IDs |
 
-   After adding all eight scopes the list should look like:
+   After adding all seven scopes the list should look like:
    ```
    groups:write  groups:read  groups:history
    chat:write    im:write
    reactions:read  reactions:write
-   users:read
    ```
 
 ---
@@ -252,9 +257,9 @@ The ID looks like `U0XXXXXXX` or `U01XXXXXXXX` (9–11 characters starting with 
 |------|-----------------|
 | `xapp-...` app-level token | Settings → Socket Mode |
 | `xoxb-...` bot token | Settings → Install App |
-| `U...` your Slack user ID | Your Slack profile |
+| `U...` your Slack user ID | Your Slack profile (must be the `U0XXXXXXX` ID, not a display name) |
 | Socket Mode enabled | Settings → Socket Mode → ON |
-| All 8 bot scopes added | Features → OAuth & Permissions |
+| All 7 bot scopes added | Features → OAuth & Permissions |
 | `message.groups` event subscribed | Features → Event Subscriptions |
 | `reaction_added` event subscribed | Features → Event Subscriptions |
 | App installed to workspace | Settings → Install App |
@@ -506,9 +511,9 @@ All skills are invoked inside a Claude Code session by typing the skill name.
 | Skill | When to use |
 |-------|-------------|
 | `/wg <name> [U... U...]` | **Start a working group.** Create the channel, post your first plan, invite collaborators. Collaborators optional for solo testing. |
-| `/wg-plan [channel]` | **Post a new plan thread** in an existing channel, from a new Claude session. One session = one thread. |
-| `/wg-sync` | **Pull feedback** on your plan into the current session. Also shows the current plan version for context. Prompts you to revise if feedback exists. |
-| `/wg-approve` | **Approve your own plan.** Marks the current version as final and adds a ✅ reaction in Slack visible to all collaborators. |
+| `/wg-plan [channel]` | **Post a new plan thread** in an existing channel. Works from any Claude session. |
+| `/wg-sync [channel] [thread-ts]` | **Pull feedback** on your plan into the current session. Pass `channel` to target any thread from the global registry without a session file. Prompts you to revise if feedback exists. |
+| `/wg-approve [channel] [thread-ts]` | **Approve your own plan.** Marks the latest version as final and adds a ✅ reaction to the most recent plan post in Slack. |
 | `/wg-status [channel]` | **Overview of a channel**: every plan's owner, version, feedback count, approval state, and any file conflicts. Suggests next actions. |
 | `/wg-list` | **Overview of all channels** you're tracking locally. Sorted by last activity. Shows conflict warnings and approved counts. |
 | `/wg-join <channel>` | **Collaborator entrypoint.** Bootstraps local state from Slack history, then guides you to contribute a plan or give feedback. |
@@ -526,9 +531,9 @@ Skills call these for you; you rarely need to invoke them directly.
 |------------|--------------|-------------|
 | `create` | `--channel`, `--collaborators`, `--plan-file/--plan-text`, `--files`, `--session-dir` | Create channel, invite users, post plan, save state |
 | `plan` | `--channel`, `--plan-file/--plan-text`, `--files`, `--session-dir` | Post a new plan thread in an existing channel |
-| `reply` | `--plan-file/--plan-text`, `--files`, `--session-dir` | Post a revision to the session's thread |
-| `sync` | `--session-dir` | Print feedback + current plan text for the session's thread |
-| `approve` | `--channel` (opt), `--session-dir` | Mark plan approved, add ✅ reaction |
+| `reply` | `--plan-file/--plan-text`, `--files`, `--channel` (opt), `--thread-ts` (opt), `--session-dir` | Post a revision. Pass `--channel` to bypass session file; `--thread-ts` to disambiguate when you own multiple threads. |
+| `sync` | `--channel` (opt), `--thread-ts` (opt), `--session-dir` | Print feedback + current plan text. Pass `--channel` to target any thread from the global registry without a session file. |
+| `approve` | `--channel` (opt), `--thread-ts` (opt), `--session-dir` | Mark plan approved, add ✅ reaction to the latest reply (not the top-level post). |
 | `status` | `--channel` | Print all threads with feedback counts and conflict warnings |
 | `list` | `--open-only` | List all tracked channels sorted by last activity |
 | `link` | `--channel`, `--thread-ts`, `--session-dir` | Manually link a session to a thread |
@@ -588,6 +593,7 @@ Skills call these for you; you rarely need to invoke them directly.
       "approved": false,
       "approved_by": null,
       "files": ["auth/middleware.py", "auth/tokens.py"],
+      "latest_reply_ts": "1234567890.333333",
       "plan_versions": [
         {
           "version": 1,
@@ -597,7 +603,8 @@ Skills call these for you; you rarely need to invoke them directly.
         {
           "version": 2,
           "text": "## Plan v2\n\nRevised approach...",
-          "posted_at": "2026-02-19T10:45:00Z"
+          "posted_at": "2026-02-19T10:45:00Z",
+          "ts": "1234567890.333333"
         }
       ],
       "feedback": [
@@ -670,6 +677,22 @@ Verify skills are in `~/.claude/commands/`:
 ls ~/.claude/commands/wg*.md
 ```
 If any are missing, re-run `./install.sh` (it will ask before overwriting the config).
+
+**"/wg-sync" reports the wrong channel or "is archived":**
+The session file in your project directory (`.claude/wg_session.json`) still
+points to an old or archived channel. Pass `--channel` explicitly to target
+any active thread from the global registry:
+```
+/wg-sync <channel-name>
+```
+The session file is a convenience cache — it is never required.
+
+**`my_slack_user_id` must be a real Slack user ID:**
+The value in `~/.claude/wg/config.json` must be your Slack user ID in
+`U0XXXXXXX` format (not a display name). To find it: Slack → Profile → ⋯ →
+Copy member ID. Ownership inference (used by `sync`, `reply`, `approve` when
+`--thread-ts` is omitted) compares this value against the `owner` field stored
+in each thread.
 
 **Conflict warning ⚠️:**
 Two open plans in the same channel declare overlapping files in `--files`.
