@@ -1,0 +1,35 @@
+[project]
+name = "claude-wg"
+version = "0.1.0"
+description = "Working group collaboration for Claude Code via Slack"
+requires-python = ">=3.10"
+dependencies = [
+    "slack-bolt>=1.18.0",
+    "slack-sdk>=3.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_return_any = true
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "ruff>=0.15.1",
+]

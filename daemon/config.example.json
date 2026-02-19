@@ -1,0 +1,7 @@
+{
+  "slack_bot_token": "xoxb-your-bot-token-here",
+  "slack_app_token": "xapp-your-app-level-token-here",
+  "my_slack_user_id": "UXXXXXXXXX",
+  "state_dir": "~/.claude/wg",
+  "notify_macos": true
+}
