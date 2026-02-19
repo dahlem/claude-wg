@@ -19,6 +19,7 @@ is explicit, approval is tracked — all without leaving your terminal.
 4. [User Experience Flows](#user-experience-flows)
    - [Solo Self-Test](#solo-self-test)
    - [Plan Owner Flow](#plan-owner-flow)
+   - [Multi-Section Plan Flow](#multi-section-plan-flow)
    - [Collaborator: Slack-Only](#collaborator-slack-only-mode)
    - [Collaborator: Daemon Mode](#collaborator-daemon-mode)
    - [Full Team Flow](#full-team-multi-plan-flow)
@@ -35,14 +36,22 @@ You are working in a Claude Code session. You have a plan that touches shared
 infrastructure, or you want architectural feedback before you write a line of
 code. You type `/wg my-feature U456 U789`.
 
-Claude creates a private Slack channel `#wg_my-feature`, posts your plan as a
-top-level message, invites your teammates, and sends them each a DM with a
-direct link to the channel. Your daemon starts watching the channel.
+Claude creates a private Slack channel `#wg_my-feature`, posts your plan, invites
+your teammates, and sends them each a DM with a direct link to the channel. Your
+daemon starts watching the channel.
 
-Your teammate opens Slack, reads the plan, replies in the thread — or reacts ✅
-to approve it. Their reply is picked up by your daemon, which fires a macOS
-notification. You type `/wg-sync` in Claude. The feedback appears in context.
-You revise. You post the revision. You get approval. You close.
+**Single-section plans** (no Markdown headings) are posted as one top-level
+Slack message. Your teammate replies in that thread. The reply appears in Claude
+when you run `/wg-sync`. You revise. You post the revision. You get approval.
+You close.
+
+**Multi-section plans** (any plan with `#`, `##`, or `###` headings) are posted
+differently: an anchor overview message lists the sections, then each section
+appears as its own top-level Slack message with its own thread. Collaborators
+reply section-by-section, giving targeted feedback. When you run `/wg-sync`,
+Claude spawns one parallel subagent per section that has new feedback, collects
+compact syntheses, and presents a unified view — without pulling every raw reply
+into your session's context.
 
 **Two participation tiers:**
 
@@ -422,15 +431,167 @@ is kept for reference.
 
 ---
 
+### Multi-Section Plan Flow
+
+When a plan has Markdown headings, claude-wg posts it as a set of separate
+Slack messages rather than one long thread. This section walks through the
+complete lifecycle — what the owner sees, what collaborators see, and how
+feedback flows back.
+
+#### What appears in Slack
+
+For a plan with five sections (About the Role, What You Will Do, Requirements,
+Balance, Offer), the channel looks like this immediately after posting:
+
+```
+#wg_research-scientist
+├── [Anchor] Plan v1 · #wg_research-scientist          ← overview + section list
+├── [Section 1] About the Role                         ← own thread
+├── [Section 2] What You Will Do                       ← own thread
+├── [Section 3] What We Are Looking For                ← own thread
+├── [Section 4] How We Think About the Balance         ← own thread
+└── [Section 5] What We Offer                          ← own thread
+```
+
+The anchor message reads something like:
+
+```
+*Plan v1* · `#wg_research-scientist`
+
+*Sections:*
+  1. About the Role
+  2. What You Will Do
+  3. What We Are Looking For
+  4. How We Think About the Balance
+  5. What We Offer
+
+_Reply in each section below with your feedback._
+```
+
+#### What collaborators do in Slack
+
+Collaborators reply directly in the thread of the section they want to comment
+on. There is no special syntax — just reply as you would in any Slack thread.
+
+```
+#wg_research-scientist
+└── [Section 3] What We Are Looking For
+    ├── owner: "First or co-first author on at least two accepted papers..."
+    ├── alice: "Should we require at least one paper as sole first author,
+    │          or is co-first author at a top venue sufficient?"
+    └── bob:   "Production engineering bullet is great — suggest adding
+                'experience with model serving infra' to preferred list."
+```
+
+Each section thread is independent. Alice can comment on Requirements while Bob
+comments on What We Offer at the same time, without their replies colliding in a
+single thread.
+
+**Approving a section:** If a collaborator is happy with a specific section,
+they react ✅ on that section's message. The daemon routes the reaction to that
+section's approval state without marking the whole plan approved.
+
+**Approving the whole plan:** A ✅ reaction on the anchor message (or any plan
+revision posted in the anchor thread) marks the entire plan approved.
+
+#### What the owner sees: parallel sync
+
+When the owner runs `/wg-sync`:
+
+1. Claude calls `sync --overview` to fetch the compact section list:
+   ```
+   Sections:
+     1.   About the Role            [no feedback]
+     2.   What You Will Do          [no feedback]
+     3. ✅ What We Are Looking For  [2 feedback items]
+          ts: 1771538032.123456
+     4.   How We Think...           [1 feedback item]
+          ts: 1771538033.456789
+     5.   What We Offer             [no feedback]
+   ```
+
+2. Claude spawns **one subagent per section** that has new feedback — in
+   parallel. Each subagent calls `sync --section-ts <ts>` and synthesises the
+   replies into 2–3 sentences.
+
+3. Claude collects the syntheses and presents a unified view:
+
+   ```
+   ## Section 3 — What We Are Looking For
+   Alice asks whether co-first authorship at a top venue is sufficient or
+   whether sole first authorship should be required. Bob suggests adding
+   model serving infrastructure experience to the preferred list.
+   → Suggested revision: clarify co-first policy; add serving infra bullet.
+
+   ## Section 4 — How We Think About the Balance
+   Carol notes the section reads as slightly defensive — she suggests
+   reframing it as a positive signal ("owners of the full stack") rather
+   than a clarification of what the role is not.
+   → Suggested revision: reframe opening sentence positively.
+   ```
+
+   Sections with no feedback are omitted from the synthesis. The owner only
+   sees what changed.
+
+#### Ideal collaboration pattern
+
+The multi-section model works best when:
+
+- **Sections map to distinct concerns.** Each heading covers one topic, so
+  reviewers know exactly where to put feedback. Headings like "Requirements",
+  "Responsibilities", and "What We Offer" are cleaner boundaries than
+  "Thoughts" or "Misc".
+
+- **Collaborators pick their lane.** A hiring manager might focus on
+  Requirements; a senior engineer might focus on What You Will Do. Parallel
+  section threads make this natural — there is no need to prefix every message
+  with "re: the third bullet in section 4".
+
+- **Approvals are granular.** A collaborator can react ✅ on sections they are
+  satisfied with while leaving sections they are still thinking about open. The
+  owner can see at a glance which sections are settled and which need more
+  iteration.
+
+- **Revisions are targeted.** Because feedback is attributed to specific
+  sections, the owner can revise section by section rather than re-reading
+  the entire plan for every comment.
+
+#### Section-level approval from the owner side
+
+Once the owner has incorporated feedback and is ready to sign off on individual
+sections:
+
+```
+/wg-sync research-scientist --overview
+```
+
+This shows which sections are approved (✅) and which are still open. To approve
+a specific section:
+
+```
+/wg-approve research-scientist --section-ts 1771538032.123456
+```
+
+A ✅ reaction appears on that section's Slack message. When all sections are
+approved (or when the owner is satisfied with the whole plan):
+
+```
+/wg-approve research-scientist
+```
+
+This approves the plan as a whole and adds ✅ to the latest plan revision.
+
+---
+
 ### Collaborator: Slack-Only Mode
 
 No installation needed. Just reply in Slack.
 
-- Each top-level message in a `wg_*` channel is a plan
-- Reply in the thread to give feedback — the plan owner's daemon picks it up
-- React ✅ (`white_check_mark`) on any message in the thread to approve the plan
+- For **single-section plans**: one top-level message per plan — reply in its thread
+- For **multi-section plans**: an anchor overview message plus one top-level message per section — reply in whichever section thread is relevant to your feedback
+- React ✅ (`white_check_mark`) on a section message to approve that section, or on the anchor / any plan reply to approve the whole plan
 
-That's it. The plan owner's Claude session receives your feedback automatically.
+That's it. The plan owner's Claude session receives your feedback automatically — no setup, no daemon, no Claude Code required.
 
 ---
 
