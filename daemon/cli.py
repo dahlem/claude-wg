@@ -66,13 +66,30 @@ The channel is private and only visible to invited collaborators.
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def slack(method: str, **kwargs):
-    """Call a Slack API method and return the response, raising on error."""
+    """Call a Slack API method and return the response, raising on error.
+
+    Retries once on transient connection errors (stale keep-alive, connection
+    reset) before giving up.  This is needed because the urllib-based SDK
+    client occasionally reuses a keep-alive connection after the server has
+    closed it, causing an spurious ConnectionRefusedError / URLError.
+    """
+    import time
+    from urllib.error import URLError
+
     fn = getattr(client, method)
-    try:
-        return fn(**kwargs)
-    except SlackApiError as e:
-        print(f"Slack API error ({method}): {e.response['error']}", file=sys.stderr)
-        sys.exit(1)
+    for attempt in range(2):
+        try:
+            return fn(**kwargs)
+        except SlackApiError as e:
+            print(f"Slack API error ({method}): {e.response['error']}", file=sys.stderr)
+            sys.exit(1)
+        except (URLError, OSError) as e:
+            if attempt == 0:
+                # Likely a stale keep-alive connection; pause briefly and retry
+                time.sleep(0.5)
+                continue
+            print(f"Slack connection error ({method}): {e}", file=sys.stderr)
+            sys.exit(1)
 
 
 def read_plan(plan_file: str | None, plan_text: str | None) -> str:
