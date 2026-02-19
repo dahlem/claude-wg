@@ -20,6 +20,7 @@ __status__ = "Development"
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -83,8 +84,74 @@ def read_plan(plan_file: str | None, plan_text: str | None) -> str:
     sys.exit(1)
 
 
+def md_to_mrkdwn(text: str) -> str:
+    """Convert standard Markdown to Slack mrkdwn format.
+
+    Handles headings, bold, italic, unordered bullets, links, and horizontal
+    rules. Code blocks (``` fences) and inline code are passed through verbatim.
+    """
+    result = []
+    in_code_block = False
+
+    for line in text.split("\n"):
+        # Preserve fenced code blocks verbatim
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            result.append(line)
+            continue
+        if in_code_block:
+            result.append(line)
+            continue
+
+        # Headings (any level) → *bold line*
+        heading = re.match(r"^#{1,6}\s+(.*)", line)
+        if heading:
+            result.append(f"*{heading.group(1)}*")
+            continue
+
+        # Horizontal rules → thin separator
+        if re.match(r"^[-*_]{3,}\s*$", line):
+            result.append("───────────────────")
+            continue
+
+        # Stash inline code spans so their contents are never transformed.
+        # Replace `...` with a placeholder keyed by index.
+        code_spans: list[str] = []
+        def stash_code(m: re.Match) -> str:
+            code_spans.append(m.group(0))
+            return f"\x01CODE{len(code_spans) - 1}\x01"
+        line = re.sub(r"`[^`]+`", stash_code, line)
+
+        # Unordered bullets: - item / * item → • item (preserve indent)
+        line = re.sub(r"^(\s*)[-*]\s+", r"\1• ", line)
+
+        # Bold: **text** / __text__ → *text*
+        # Use null-byte placeholder so bold markers don't get picked up by
+        # the italic pass below.
+        line = re.sub(r"\*\*(.+?)\*\*", "\x00\\1\x00", line)
+        line = re.sub(r"__(.+?)__", "\x00\\1\x00", line)
+
+        # Italic: *text* → _text_ (Slack italic)
+        line = re.sub(r"\*(.+?)\*", r"_\1_", line)
+        # _text_ is already correct; nothing to do for underscore italic.
+
+        # Restore bold placeholders → *text*
+        line = re.sub(r"\x00(.+?)\x00", r"*\1*", line)
+
+        # Links: [text](url) → <url|text>
+        line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", line)
+
+        # Restore inline code spans verbatim
+        for i, span in enumerate(code_spans):
+            line = line.replace(f"\x01CODE{i}\x01", span)
+
+        result.append(line)
+
+    return "\n".join(result)
+
+
 def format_plan_message(plan: str, version: int, channel_name: str) -> str:
-    return f"*Plan v{version}* · `#{channel_name}`\n\n{plan}"
+    return f"*Plan v{version}* · `#{channel_name}`\n\n{md_to_mrkdwn(plan)}"
 
 
 def parse_files(files_str: str | None) -> list[str]:
@@ -101,7 +168,6 @@ def resolve_user_ids(identifiers: list[str]) -> list[str]:
     uppercase alphanumeric) are passed through unchanged.  Anything else is
     treated as a display name / username and looked up via users.list.
     """
-    import re
     id_pattern = re.compile(r"^[UW][A-Z0-9]+$")
 
     to_resolve = [i for i in identifiers if not id_pattern.match(i)]

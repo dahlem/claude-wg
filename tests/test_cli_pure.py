@@ -215,3 +215,77 @@ def test_resolve_user_ids_mixed(monkeypatch):
     result = cli.resolve_user_ids(["U123DIRECT", "eve"])
     assert "U123DIRECT" in result
     assert "U_EVE" in result
+
+
+# ── md_to_mrkdwn ──────────────────────────────────────────────────────────────
+
+def test_md_h1():
+    assert cli.md_to_mrkdwn("# Hello") == "*Hello*"
+
+def test_md_h2():
+    assert cli.md_to_mrkdwn("## Section") == "*Section*"
+
+def test_md_h3():
+    assert cli.md_to_mrkdwn("### Sub") == "*Sub*"
+
+def test_md_bold_double_asterisk():
+    assert cli.md_to_mrkdwn("**bold**") == "*bold*"
+
+def test_md_bold_double_underscore():
+    assert cli.md_to_mrkdwn("__bold__") == "*bold*"
+
+def test_md_italic_asterisk():
+    assert cli.md_to_mrkdwn("*italic*") == "_italic_"
+
+def test_md_italic_underscore_passthrough():
+    # _text_ is already valid Slack mrkdwn — should pass through unchanged
+    assert cli.md_to_mrkdwn("_italic_") == "_italic_"
+
+def test_md_bold_and_italic_coexist():
+    result = cli.md_to_mrkdwn("**bold** and *italic*")
+    assert "*bold*" in result
+    assert "_italic_" in result
+
+def test_md_unordered_dash():
+    assert cli.md_to_mrkdwn("- item") == "• item"
+
+def test_md_unordered_asterisk():
+    assert cli.md_to_mrkdwn("* item") == "• item"
+
+def test_md_bullet_preserves_indent():
+    assert cli.md_to_mrkdwn("  - nested") == "  • nested"
+
+def test_md_link():
+    assert cli.md_to_mrkdwn("[click here](https://example.com)") == "<https://example.com|click here>"
+
+def test_md_horizontal_rule():
+    result = cli.md_to_mrkdwn("---")
+    assert result != "---"
+    assert len(result) > 0
+
+def test_md_code_block_preserved():
+    text = "```\n**not bold**\n# not heading\n```"
+    result = cli.md_to_mrkdwn(text)
+    assert "**not bold**" in result
+    assert "# not heading" in result
+
+def test_md_inline_code_preserved():
+    # Inline code passes through — no transformation inside backticks expected
+    result = cli.md_to_mrkdwn("use `**raw**` here")
+    # The inline backtick content is not specially handled (no fence),
+    # but the surrounding text is transformed
+    assert "`**raw**`" in result
+
+def test_md_multiline():
+    text = "# Title\n\n- item one\n- item two\n\n**done**"
+    result = cli.md_to_mrkdwn(text)
+    assert "*Title*" in result
+    assert "• item one" in result
+    assert "• item two" in result
+    assert "*done*" in result
+
+def test_md_plain_text_unchanged():
+    assert cli.md_to_mrkdwn("just plain text") == "just plain text"
+
+def test_md_empty_string():
+    assert cli.md_to_mrkdwn("") == ""
