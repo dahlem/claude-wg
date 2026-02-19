@@ -5,6 +5,9 @@ Listens to all wg_* private channels, routes feedback to local state files,
 and fires macOS notifications when relevant activity arrives.
 """
 
+__authors__ = ["Dominik Dahlem"]
+__status__ = "Development"
+
 import logging
 import subprocess
 import sys

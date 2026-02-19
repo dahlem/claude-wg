@@ -1,5 +1,8 @@
 """Shared state management for claude-wg."""
 
+__authors__ = ["Dominik Dahlem"]
+__status__ = "Development"
+
 import json
 from datetime import datetime, timezone
 from pathlib import Path

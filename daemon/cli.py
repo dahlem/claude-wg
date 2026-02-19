@@ -15,6 +15,9 @@ Commands:
   list       List all working group channels
 """
 
+__authors__ = ["Dominik Dahlem"]
+__status__ = "Development"
+
 import argparse
 import json
 import sys
@@ -25,6 +28,7 @@ from slack_sdk.errors import SlackApiError
 
 sys.path.insert(0, str(Path(__file__).parent))
 from state import (
+    get_state_dir,
     load_channel_state,
     load_config,
     load_session,
@@ -635,7 +639,7 @@ def cmd_list(args) -> None:
     """List all working group channels."""
     from datetime import datetime, timezone
 
-    channels_dir = Path.home() / ".claude" / "wg" / "channels"
+    channels_dir = get_state_dir()
     if not channels_dir.exists():
         print("No working group channels found.")
         return
