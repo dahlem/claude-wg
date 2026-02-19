@@ -30,26 +30,57 @@ Works from **any Claude session** — no project-local session file required.
    c. If neither works, run `/wg-status <channel>` to list available threads,
       then ask the user which to target and re-run with `--channel` + `--thread-ts`.
 
-2. **Read the output carefully.** It contains:
+2. **Check whether the plan is multi-section:**
+
+   Run the overview mode to detect sections:
+   ```bash
+   ~/.claude/wg/venv/bin/python ~/.claude/wg/cli.py sync \
+     --overview --channel <channel> [--thread-ts <ts>]
+   ```
+
+   - If the output says "This plan has no sections", skip to step 3 (single-message flow).
+   - If sections are listed, proceed to step 2a (multi-section parallel sync).
+
+   **2a. Multi-section parallel sync:**
+
+   The overview output lists each section's heading, timestamp (`ts:`),
+   feedback count, and approval state (✅ if approved). For every section that
+   has feedback (`[N feedback items]`):
+
+   Use the Task tool to spawn **one subagent per section** in parallel (all in
+   a single message, using multiple Task tool calls). Each subagent should:
+
+   ```
+   subagent_type: Bash
+   prompt: |
+     Run this command and return the full output:
+     ~/.claude/wg/venv/bin/python ~/.claude/wg/cli.py sync \
+       --section-ts <section_ts> --channel <channel> [--thread-ts <thread_ts>]
+     Then synthesise the feedback in 2-3 sentences covering: key concerns raised,
+     any blocking issues, and overall sentiment. Return: HEADING + SYNTHESIS.
+   ```
+
+   Wait for all subagents to complete, then collect their syntheses and present
+   a unified summary to the user (one section per block).
+
+3. **Single-message plan — read output carefully.** It contains:
    - Channel and thread metadata
    - Approval status
    - The current plan version text (for reference)
    - Each feedback item: author, timestamp, text
 
-3. **If no feedback yet:** Tell the user "No feedback received yet on your
+4. **If no feedback yet (any mode):** Tell the user "No feedback received yet on your
    plan. Check back later or ask collaborators to respond in Slack."
 
-4. **If feedback exists:** Synthesise the feedback and present it to the user:
-   - Show the current plan version so the user has context
-   - Summarise the key points raised by each collaborator
-   - Identify areas of agreement vs. disagreement
-   - Highlight any blocking concerns
-   - Suggest how the plan might be revised
+5. **If feedback exists (any mode):** Synthesise and present to the user:
+   - For multi-section: one synthesis block per section (from subagents)
+   - For single-message: summarise all feedback, areas of agreement/disagreement,
+     blocking concerns, suggested revisions
 
-5. **Ask the user:** "Would you like to revise the plan based on this feedback?
+6. **Ask the user:** "Would you like to revise the plan based on this feedback?
    If so, let's work on the next version and I'll post it as a reply."
 
-6. **If the user wants to revise:**
+7. **If the user wants to revise:**
    - Work through the plan revision together
    - Ask: "Which files will this revised plan modify? (Comma-separated paths, or enter to keep the same.)"
    - Write the revised plan to `/tmp/wg_plan.md`
@@ -62,7 +93,7 @@ Works from **any Claude session** — no project-local session file required.
      Add `--files "path/to/file.py"` if files changed.
    - Confirm: "Plan v<N> posted. Waiting for further feedback."
 
-7. **If the plan is already approved (✅):**
+8. **If the plan is already approved (✅):**
    - Congratulate the user
    - Suggest running `/wg-close <channel>` if all plans in the channel are done
 

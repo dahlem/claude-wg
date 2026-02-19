@@ -154,6 +154,128 @@ def format_plan_message(plan: str, version: int, channel_name: str) -> str:
     return f"*Plan v{version}* · `#{channel_name}`\n\n{md_to_mrkdwn(plan)}"
 
 
+def parse_sections(plan: str) -> list[tuple[str, str]]:
+    """Split a Markdown plan into (heading_line, body) pairs.
+
+    Splits on any h1–h3 heading (``# …``, ``## …``, ``### …``).  Content
+    before the first heading is attached to an empty-string heading.  If the
+    plan has no headings at all, returns a single ``("", plan)`` pair, which
+    signals callers to use single-message (backwards-compatible) behaviour.
+
+    Returns a list of ``(heading_line, body)`` tuples where *heading_line* is
+    the raw Markdown heading (e.g. ``## Section 1: Foo``) and *body* is the
+    content that follows it up to the next heading, stripped of leading /
+    trailing blank lines.
+    """
+    sections: list[tuple[str, str]] = []
+    current_heading: str = ""
+    current_body: list[str] = []
+
+    for line in plan.split("\n"):
+        if re.match(r"^#{1,3}\s+", line):
+            if current_heading or current_body:
+                sections.append((current_heading, "\n".join(current_body).strip()))
+            current_heading = line
+            current_body = []
+        else:
+            current_body.append(line)
+
+    if current_heading or current_body:
+        sections.append((current_heading, "\n".join(current_body).strip()))
+
+    return sections if sections else [("", plan)]
+
+
+def format_section_message(heading: str, body: str) -> str:
+    """Format a single plan section as a Slack message."""
+    parts: list[str] = []
+    if heading:
+        parts.append(md_to_mrkdwn(heading))
+    if body:
+        parts.append(md_to_mrkdwn(body))
+    return "\n\n".join(parts)
+
+
+def format_plan_anchor_message(version: int, channel_name: str,
+                                sections: list[tuple[str, str]]) -> str:
+    """Format the overview/anchor message for a multi-section plan."""
+    lines = [f"*Plan v{version}* · `#{channel_name}`", ""]
+    lines.append("*Sections:*")
+    for i, (heading, _) in enumerate(sections, 1):
+        m = re.match(r"^#{1,6}\s+(.*)", heading)
+        heading_text = m.group(1) if m else heading or f"Section {i}"
+        lines.append(f"  {i}. {heading_text}")
+    lines.extend(["", "_Reply in each section below with your feedback._"])
+    return "\n".join(lines)
+
+
+def _post_plan(channel_id: str, plan: str, version: int,
+               channel_name: str, files: list[str]) -> tuple[str, dict]:
+    """Post a plan (possibly multi-section) and return (anchor_ts, thread_entry).
+
+    If the plan contains h1–h3 headings, each section is posted as a separate
+    top-level Slack message preceded by an anchor overview message.  Otherwise
+    the whole plan is posted as a single message (backwards-compatible).
+    """
+    sections = parse_sections(plan)
+
+    if len(sections) > 1:
+        # Multi-section mode: anchor + one top-level message per section
+        anchor_msg = format_plan_anchor_message(version, channel_name, sections)
+        res = slack("chat_postMessage", channel=channel_id, text=anchor_msg, mrkdwn=True)
+        anchor_ts: str = res["ts"]
+
+        section_states: list[dict] = []
+        section_index: dict[str, int] = {}
+        for i, (heading, body) in enumerate(sections):
+            sec_msg = format_section_message(heading, body)
+            sec_res = slack("chat_postMessage", channel=channel_id, text=sec_msg, mrkdwn=True)
+            section_ts: str = sec_res["ts"]
+            section_states.append({
+                "heading": heading,
+                "body": body,
+                "ts": section_ts,
+                "feedback": [],
+                "approved": False,
+                "approved_by": None,
+            })
+            section_index[section_ts] = i
+
+        thread_entry: dict = {
+            "owner": MY_USER_ID,
+            "ts": anchor_ts,
+            "version": version,
+            "status": "awaiting_feedback",
+            "approved": False,
+            "approved_by": None,
+            "files": files,
+            "plan_versions": [{"version": version, "text": plan, "posted_at": now_iso()}],
+            "feedback": [],
+            "sections": section_states,
+            "section_index": section_index,
+        }
+        print(f"Plan posted as {len(sections)} sections. anchor_ts={anchor_ts}")
+        return anchor_ts, thread_entry
+
+    # Single-message mode (no h1–h3 headings)
+    msg = format_plan_message(plan, version, channel_name)
+    single_res = slack("chat_postMessage", channel=channel_id, text=msg, mrkdwn=True)
+    single_ts: str = single_res["ts"]
+    single_entry: dict = {
+        "owner": MY_USER_ID,
+        "ts": single_ts,
+        "version": version,
+        "status": "awaiting_feedback",
+        "approved": False,
+        "approved_by": None,
+        "files": files,
+        "plan_versions": [{"version": version, "text": plan, "posted_at": now_iso()}],
+        "feedback": [],
+    }
+    print(f"Plan posted. thread_ts={single_ts}")
+    return single_ts, single_entry
+
+
 def parse_files(files_str: str | None) -> list[str]:
     """Parse comma-separated file paths into a list."""
     if not files_str:
@@ -289,14 +411,7 @@ def cmd_create(args) -> None:
         f" + collaborators: {', '.join(collaborators_display)}" if collaborators_display else ""
     ))
 
-    # Post the plan
-    plan = read_plan(args.plan_file, args.plan_text)
-    msg = format_plan_message(plan, version=1, channel_name=channel_name)
-    res = slack("chat_postMessage", channel=channel_id, text=msg, mrkdwn=True)
-    thread_ts = res["ts"]
-    print(f"Plan posted. thread_ts={thread_ts}")
-
-    # Get team info for deep-link (Gap 9)
+    # Get team info for deep-link
     try:
         auth_res = slack("auth_test")
         team_id = auth_res.get("team_id", "")
@@ -306,7 +421,9 @@ def cmd_create(args) -> None:
         deep_link = ""
         web_link = ""
 
+    plan = read_plan(args.plan_file, args.plan_text)
     files = parse_files(getattr(args, "files", None))
+    thread_ts, thread_entry = _post_plan(channel_id, plan, 1, channel_name, files)
 
     # Initialise state
     state = {
@@ -314,21 +431,7 @@ def cmd_create(args) -> None:
         "channel_name": channel_name,
         "created_by": MY_USER_ID,
         "collaborators": args.collaborators or [],
-        "threads": {
-            thread_ts: {
-                "owner": MY_USER_ID,
-                "ts": thread_ts,
-                "version": 1,
-                "status": "awaiting_feedback",
-                "approved": False,
-                "approved_by": None,
-                "files": files,
-                "plan_versions": [
-                    {"version": 1, "text": plan, "posted_at": now_iso()}
-                ],
-                "feedback": [],
-            }
-        },
+        "threads": {thread_ts: thread_entry},
     }
     save_channel_state(channel_name, state)
 
@@ -362,31 +465,13 @@ def cmd_plan(args) -> None:
         sys.exit(1)
 
     channel_id = state["channel_id"]
-    version = 1
     plan = read_plan(args.plan_file, args.plan_text)
-    msg = format_plan_message(plan, version, channel_name)
-    res = slack("chat_postMessage", channel=channel_id, text=msg, mrkdwn=True)
-    thread_ts = res["ts"]
-
     files = parse_files(getattr(args, "files", None))
+    thread_ts, thread_entry = _post_plan(channel_id, plan, 1, channel_name, files)
 
-    state["threads"][thread_ts] = {
-        "owner": MY_USER_ID,
-        "ts": thread_ts,
-        "version": version,
-        "status": "awaiting_feedback",
-        "approved": False,
-        "approved_by": None,
-        "files": files,
-        "plan_versions": [
-            {"version": 1, "text": plan, "posted_at": now_iso()}
-        ],
-        "feedback": [],
-    }
+    state["threads"][thread_ts] = thread_entry
     save_channel_state(channel_name, state)
     save_session(channel_name, thread_ts, args.session_dir or None)
-
-    print(f"Plan posted. thread_ts={thread_ts}")
     print(f"Session linked to {channel_name}:{thread_ts}")
 
 
@@ -476,6 +561,58 @@ def cmd_sync(args) -> None:
         print("Thread not found in state.", file=sys.stderr)
         sys.exit(1)
 
+    # ── Overview mode: compact section list ───────────────────────────────────
+    if getattr(args, "overview", False):
+        sections = thread.get("sections")
+        if not sections:
+            print("This plan has no sections. Use sync without --overview for full feedback.")
+            return
+        print(f"# Plan Overview — #{channel_name}")
+        print(f"Thread: {thread_ts}  |  Plan v{thread.get('version', 1)}")
+        print(f"Status: {thread.get('status', 'open')}")
+        if thread.get("approved"):
+            print(f"✅ Approved by <@{thread['approved_by']}>")
+        print()
+        print("Sections:")
+        for i, section in enumerate(sections, 1):
+            heading = section.get("heading", "")
+            m = re.match(r"^#{1,6}\s+(.*)", heading)
+            heading_text = m.group(1) if m else heading or f"Section {i}"
+            fb_count = len(section.get("feedback", []))
+            sec_ts = section.get("ts", "")
+            approved_str = " ✅" if section.get("approved") else ""
+            feedback_note = f"  [{fb_count} feedback item{'s' if fb_count != 1 else ''}]" if fb_count else "  [no feedback]"
+            print(f"  {i}.{approved_str} {heading_text}{feedback_note}")
+            print(f"     ts: {sec_ts}")
+        return
+
+    # ── Section-feedback mode: one section's full thread ─────────────────────
+    section_ts = getattr(args, "section_ts", None)
+    if section_ts:
+        sections = thread.get("sections", [])
+        section_index = thread.get("section_index", {})
+        idx = section_index.get(section_ts)
+        if idx is None:
+            print(f"Section ts {section_ts!r} not found in this plan.", file=sys.stderr)
+            sys.exit(1)
+        section = sections[idx]
+        heading = section.get("heading", "")
+        m = re.match(r"^#{1,6}\s+(.*)", heading)
+        heading_text = m.group(1) if m else heading or f"Section {idx + 1}"
+        print(f"# Section Feedback — {heading_text}")
+        print(f"Channel: #{channel_name}  |  Section ts: {section_ts}")
+        print()
+        section_fb = section.get("feedback", [])
+        if not section_fb:
+            print("No feedback for this section yet.")
+            return
+        for i, entry in enumerate(section_fb, 1):
+            print(f"## Feedback {i} — <@{entry['user']}> ({entry.get('received_at', '')[:19]})")
+            print(entry["text"])
+            print()
+        return
+
+    # ── Default: full feedback view (single-message plans) ────────────────────
     feedback = [f for f in thread.get("feedback", []) if f.get("type") == "feedback"]
 
     print(f"# Working Group Feedback — #{channel_name}")
@@ -738,6 +875,34 @@ def cmd_approve(args) -> None:
         print(f"No thread owned by {MY_USER_ID} found in #{channel_name}.", file=sys.stderr)
         sys.exit(1)
 
+    # ── Per-section approval ──────────────────────────────────────────────────
+    section_ts_arg = getattr(args, "section_ts", None)
+    if section_ts_arg:
+        sections = thread.get("sections", [])
+        section_index = thread.get("section_index", {})
+        idx = section_index.get(section_ts_arg)
+        if idx is None:
+            print(f"Section ts {section_ts_arg!r} not found in this plan.", file=sys.stderr)
+            sys.exit(1)
+        section = sections[idx]
+        section["approved"] = True
+        section["approved_by"] = MY_USER_ID
+        state["threads"][thread_ts] = thread
+        save_channel_state(channel_name, state)
+        try:
+            slack("reactions_add",
+                  channel=state["channel_id"],
+                  name="white_check_mark",
+                  timestamp=section_ts_arg)
+        except Exception as e:
+            print(f"Warning: could not add reaction: {e}", file=sys.stderr)
+        heading = section.get("heading", "")
+        hm = re.match(r"^#{1,6}\s+(.*)", heading)
+        heading_text = hm.group(1) if hm else heading or f"Section {idx + 1}"
+        print(f"Section '{heading_text}' approved. ✅ reaction added in Slack.")
+        return
+
+    # ── Whole-plan approval ───────────────────────────────────────────────────
     thread["approved"] = True
     thread["approved_by"] = MY_USER_ID
     thread["status"] = "approved"
@@ -877,6 +1042,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--session-dir")
     c.add_argument("--channel", help="Channel name (bypasses session file when used with --thread-ts)")
     c.add_argument("--thread-ts", help="Thread timestamp (bypasses session file when used with --channel)")
+    c.add_argument("--overview", action="store_true",
+                   help="Print compact section list with feedback counts (multi-section plans)")
+    c.add_argument("--section-ts",
+                   help="Print feedback for a specific section identified by its Slack timestamp")
 
     # link
     c = sub.add_parser("link", help="Link session directory to a channel thread")
@@ -902,6 +1071,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("approve", help="Mark the current session's plan as approved")
     c.add_argument("--channel", help="Channel name (bypasses session file; infers thread by ownership)")
     c.add_argument("--thread-ts", help="Thread timestamp (required when you own multiple threads in the channel)")
+    c.add_argument("--section-ts", help="Approve a specific section by its Slack timestamp (multi-section plans)")
     c.add_argument("--session-dir")
 
     # list

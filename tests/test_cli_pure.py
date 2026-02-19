@@ -289,3 +289,69 @@ def test_md_plain_text_unchanged():
 
 def test_md_empty_string():
     assert cli.md_to_mrkdwn("") == ""
+
+
+# ── parse_sections ────────────────────────────────────────────────────────────
+
+def test_parse_sections_no_headings():
+    """Plans without headings produce a single ("", plan) pair."""
+    plan = "Just some plain text\nwith no headings."
+    result = cli.parse_sections(plan)
+    assert result == [("", plan)]
+
+
+def test_parse_sections_empty():
+    result = cli.parse_sections("")
+    assert result == [("", "")]
+
+
+def test_parse_sections_single_h1():
+    plan = "# Title\n\nBody text here."
+    result = cli.parse_sections(plan)
+    assert len(result) == 1
+    heading, body = result[0]
+    assert heading == "# Title"
+    assert body == "Body text here."
+
+
+def test_parse_sections_multiple():
+    plan = "# Section 1\n\nBody 1.\n\n## Section 2\n\nBody 2."
+    result = cli.parse_sections(plan)
+    assert len(result) == 2
+    assert result[0][0] == "# Section 1"
+    assert "Body 1." in result[0][1]
+    assert result[1][0] == "## Section 2"
+    assert "Body 2." in result[1][1]
+
+
+def test_parse_sections_h4_not_split():
+    """h4 and deeper headings are treated as body content, not section boundaries."""
+    plan = "# Top\n\n#### Deep heading\n\nContent."
+    result = cli.parse_sections(plan)
+    assert len(result) == 1
+    assert "#### Deep heading" in result[0][1]
+
+
+def test_parse_sections_body_stripped():
+    """Leading/trailing blank lines in section bodies are stripped."""
+    plan = "# Title\n\n\nBody\n\n"
+    result = cli.parse_sections(plan)
+    assert result[0][1] == "Body"
+
+
+def test_parse_sections_content_before_first_heading():
+    """Content before the first heading becomes a section with an empty heading."""
+    plan = "Preamble\n\n# Section 1\n\nBody."
+    result = cli.parse_sections(plan)
+    assert len(result) == 2
+    assert result[0][0] == ""
+    assert "Preamble" in result[0][1]
+    assert result[1][0] == "# Section 1"
+
+
+def test_parse_sections_three_sections():
+    plan = "# A\n\naa\n\n## B\n\nbb\n\n### C\n\ncc"
+    result = cli.parse_sections(plan)
+    assert len(result) == 3
+    headings = [h for h, _ in result]
+    assert headings == ["# A", "## B", "### C"]

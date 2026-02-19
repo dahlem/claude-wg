@@ -9,6 +9,7 @@ __authors__ = ["Dominik Dahlem"]
 __status__ = "Development"
 
 import logging
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -94,7 +95,16 @@ def handle_message(event: dict, client, logger) -> None:
     state = ensure_channel_state(channel_name, channel_id)
 
     if thread_ts is None:
-        # ── New plan posted (top-level message) ──────────────────────────────
+        # ── New top-level message ─────────────────────────────────────────────
+        # Skip if this ts is already tracked as a section in a multi-section plan.
+        # This prevents spurious thread entries for section posts from MY_USER_ID.
+        is_section = any(
+            ts in t.get("section_index", {}) for t in state["threads"].values()
+        )
+        if is_section:
+            log.debug("Ignoring section post %s (already tracked in section_index)", ts)
+            return
+
         state["threads"][ts] = {
             "owner": user,
             "ts": ts,
@@ -119,6 +129,44 @@ def handle_message(event: dict, client, logger) -> None:
 
     else:
         # ── Reply in an existing thread (feedback or iteration) ──────────────
+
+        # First check if thread_ts is a section ts (multi-section plan).
+        # If so, route the reply to that section's feedback list.
+        section_result: tuple[str, dict, int] | None = None
+        for anchor_ts, candidate in state["threads"].items():
+            idx = candidate.get("section_index", {}).get(thread_ts)
+            if idx is not None:
+                section_result = (anchor_ts, candidate, idx)
+                break
+
+        if section_result is not None:
+            _anchor_ts, anchor_thread, section_idx = section_result
+            section = anchor_thread["sections"][section_idx]
+            section["feedback"].append({
+                "user": user,
+                "ts": ts,
+                "text": text,
+                "received_at": now_iso(),
+                "type": "feedback",
+            })
+            save_channel_state(channel_name, state)
+
+            if anchor_thread.get("owner") == MY_USER_ID and user != MY_USER_ID:
+                heading = section.get("heading", "")
+                heading_m = re.match(r"^#{1,6}\s+(.*)", heading)
+                heading_text = heading_m.group(1) if heading_m else "section"
+                preview = text[:80] + ("…" if len(text) > 80 else "")
+                notify(
+                    f"Section feedback in #{channel_name}",
+                    f"<@{user}> on '{heading_text}': {preview}",
+                )
+                log.info(
+                    "Section feedback on anchor %s section %d from %s in #%s",
+                    _anchor_ts, section_idx, user, channel_name,
+                )
+            return
+
+        # Non-section reply: standard feedback / revision routing
         thread = state["threads"].get(thread_ts)
         if thread is None:
             # Thread we haven't seen — create a placeholder
@@ -189,7 +237,29 @@ def handle_reaction(event: dict, client, logger) -> None:
     if not state:
         return
 
-    # Find the thread this reaction was on (could be top-level or a reply)
+    # First: check if the reaction is on a section message (multi-section plan)
+    for thread_key, thread in state["threads"].items():
+        idx = thread.get("section_index", {}).get(item_ts)
+        if idx is not None:
+            section = thread["sections"][idx]
+            section["approved"] = True
+            section["approved_by"] = reactor
+            save_channel_state(channel_name, state)
+            if thread.get("owner") == MY_USER_ID:
+                heading = section.get("heading", "")
+                heading_m = re.match(r"^#{1,6}\s+(.*)", heading)
+                heading_text = heading_m.group(1) if heading_m else "section"
+                notify(
+                    f"Section approved in #{channel_name}",
+                    f"<@{reactor}> approved '{heading_text}' ✅",
+                )
+                log.info(
+                    "Section %d of thread %s approved by %s in #%s",
+                    idx, thread_key, reactor, channel_name,
+                )
+            return
+
+    # Otherwise: check if reaction is on the thread anchor or a reply
     for thread_key, thread in state["threads"].items():
         if thread_key == item_ts or any(f["ts"] == item_ts for f in thread.get("feedback", [])):
             if thread.get("owner") == MY_USER_ID:

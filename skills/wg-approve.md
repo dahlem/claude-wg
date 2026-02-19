@@ -46,8 +46,26 @@ within Claude Code.
 
 ## Notes
 - The `approve` command adds a ✅ (`white_check_mark`) reaction to the plan's
-  top-level Slack message, making approval visible to all channel members.
+  latest reply (or the top-level post if no revisions have been made), making
+  approval visible to all channel members.
 - If you want to approve a specific channel rather than the current session's
   channel, you can pass `--channel <name>` directly to the CLI.
 - Approval state is also stored in the local state file and will appear in
   `/wg-status` and `/wg-list` output.
+
+## Section-level approval (multi-section plans)
+
+If the plan was posted with sections (each heading as a separate Slack thread),
+you can approve individual sections:
+
+```bash
+~/.claude/wg/venv/bin/python ~/.claude/wg/cli.py approve \
+  --channel <channel> --section-ts <ts>
+```
+
+Run `/wg-sync <channel> --overview` first to see each section's `ts`.
+A ✅ reaction is added to that section's Slack message.
+
+Collaborators approving in Slack work the same way: reacting ✅ on a section
+message marks that section approved; reacting on the anchor or any plan reply
+approves the whole plan.

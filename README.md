@@ -105,6 +105,12 @@ You revise. You post the revision. You get approval. You close.
   multiple, the CLI lists them and asks for `--thread-ts` to disambiguate.
 - **One thread = one plan.** If you need a second parallel plan in the same
   channel, run `/wg-plan` from any Claude session.
+- **Per-section posting.** If your plan contains h1–h3 Markdown headings, each
+  section is posted as a separate top-level Slack message, preceded by an
+  anchor overview listing all sections. This lets collaborators give focused
+  per-section feedback in dedicated threads. `/wg-sync` automatically detects
+  sections and spawns one parallel subagent per section that has feedback,
+  returning a unified synthesis without saturating the main session's context.
 
 ---
 
@@ -532,7 +538,7 @@ Skills call these for you; you rarely need to invoke them directly.
 | `create` | `--channel`, `--collaborators`, `--plan-file/--plan-text`, `--files`, `--session-dir` | Create channel, invite users, post plan, save state |
 | `plan` | `--channel`, `--plan-file/--plan-text`, `--files`, `--session-dir` | Post a new plan thread in an existing channel |
 | `reply` | `--plan-file/--plan-text`, `--files`, `--channel` (opt), `--thread-ts` (opt), `--session-dir` | Post a revision. Pass `--channel` to bypass session file; `--thread-ts` to disambiguate when you own multiple threads. |
-| `sync` | `--channel` (opt), `--thread-ts` (opt), `--session-dir` | Print feedback + current plan text. Pass `--channel` to target any thread from the global registry without a session file. |
+| `sync` | `--channel` (opt), `--thread-ts` (opt), `--overview`, `--section-ts`, `--session-dir` | Print feedback + current plan text. `--overview` lists sections with feedback counts. `--section-ts <ts>` shows one section's feedback. Pass `--channel` to target any thread from the global registry without a session file. |
 | `approve` | `--channel` (opt), `--thread-ts` (opt), `--session-dir` | Mark plan approved, add ✅ reaction to the latest reply (not the top-level post). |
 | `status` | `--channel` | Print all threads with feedback counts and conflict warnings |
 | `list` | `--open-only` | List all tracked channels sorted by last activity |
@@ -622,7 +628,30 @@ Skills call these for you; you rarely need to invoke them directly.
           "type": "revision",
           "received_at": "2026-02-19T10:44:00Z"
         }
-      ]
+      ],
+
+      // ── Multi-section plans only ──────────────────────────────────────────
+      // Present when the plan contains h1–h3 headings. Each section is a
+      // separate top-level Slack message; section_index maps section ts → index.
+      "sections": [
+        {
+          "heading": "## Section 1: Approach",
+          "body": "We will...",
+          "ts": "1234567890.444444",
+          "feedback": [
+            {
+              "user": "U456",
+              "ts": "1234567890.555555",
+              "text": "Looks good",
+              "type": "feedback",
+              "received_at": "2026-02-19T11:00:00Z"
+            }
+          ]
+        }
+      ],
+      "section_index": {
+        "1234567890.444444": 0
+      }
     }
   }
 }
