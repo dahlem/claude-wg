@@ -88,6 +88,60 @@ def parse_files(files_str: str | None) -> list[str]:
     return [f.strip() for f in files_str.split(",") if f.strip()]
 
 
+def resolve_user_ids(identifiers: list[str]) -> list[str]:
+    """Resolve a list of Slack user IDs or usernames to user IDs.
+
+    Identifiers that already look like Slack IDs (start with U or W, all
+    uppercase alphanumeric) are passed through unchanged.  Anything else is
+    treated as a display name / username and looked up via users.list.
+    """
+    import re
+    id_pattern = re.compile(r"^[UW][A-Z0-9]+$")
+
+    to_resolve = [i for i in identifiers if not id_pattern.match(i)]
+    already_ids = {i for i in identifiers if id_pattern.match(i)}
+
+    if not to_resolve:
+        return identifiers
+
+    # Fetch all workspace users once (paginated)
+    name_to_id: dict[str, str] = {}
+    cursor = None
+    while True:
+        kwargs: dict = {"limit": 200}
+        if cursor:
+            kwargs["cursor"] = cursor
+        res = slack("users_list", **kwargs)
+        for member in res.get("members", []):
+            if member.get("deleted") or member.get("is_bot"):
+                continue
+            uid = member["id"]
+            # Index by all name fields, lowercased
+            for field in [
+                member.get("name", ""),
+                member.get("real_name", ""),
+                (member.get("profile") or {}).get("display_name", ""),
+                (member.get("profile") or {}).get("real_name", ""),
+            ]:
+                if field:
+                    name_to_id[field.lower()] = uid
+        next_cursor = res.get("response_metadata", {}).get("next_cursor", "")
+        if not next_cursor:
+            break
+        cursor = next_cursor
+
+    resolved: list[str] = list(already_ids)
+    for name in to_resolve:
+        uid = name_to_id.get(name.lower().lstrip("@"))
+        if uid:
+            resolved.append(uid)
+            print(f"Resolved {name!r} → {uid}")
+        else:
+            print(f"Warning: could not resolve user {name!r} — skipping", file=sys.stderr)
+
+    return resolved
+
+
 def find_conflicts(state: dict) -> list[tuple]:
     """Find file conflicts between open (non-approved) threads.
 
@@ -121,10 +175,9 @@ def cmd_create(args) -> None:
     channel_id = res["channel"]["id"]
     print(f"Created #{channel_name} ({channel_id})")
 
-    # Always invite MY_USER_ID so the human can see and react to the channel,
-    # then add any extra collaborators.  Build a deduplicated list so we don't
-    # call invite twice with the same user.
-    to_invite = list({MY_USER_ID, *(args.collaborators or [])})
+    # Resolve any usernames to user IDs, then always include MY_USER_ID.
+    collaborator_ids = resolve_user_ids(args.collaborators or [])
+    to_invite = list({MY_USER_ID, *collaborator_ids})
     slack("conversations_invite", channel=channel_id, users=",".join(to_invite))
     collaborators_display = [u for u in to_invite if u != MY_USER_ID]
     print(f"Invited self ({MY_USER_ID})" + (

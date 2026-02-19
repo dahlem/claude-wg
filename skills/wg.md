@@ -2,12 +2,16 @@
 
 ## Usage
 ```
-/wg <channel-name> [SlackUserID1 SlackUserID2 ...]
+/wg <channel-name> [user1 user2 ...]
 ```
+
+Collaborators can be specified as Slack usernames (`john.doe`), display names,
+or raw member IDs (`U2H8K3P`). The `@` prefix is optional.
 
 Examples:
 - `/wg auth-refactor` — solo test (just you)
-- `/wg auth-refactor U2H8K3P U9QRST4` — with collaborators
+- `/wg auth-refactor john.doe jane.smith` — by username
+- `/wg auth-refactor U2H8K3P U9QRST4` — by member ID
 
 ## What to do
 
@@ -15,7 +19,8 @@ When the user invokes `/wg`, follow these steps:
 
 1. **Parse arguments** from the user's invocation:
    - `channel_name`: the first argument (e.g. `auth-refactor` → will become `wg_auth-refactor`)
-   - `collaborators`: remaining arguments as Slack user IDs (e.g. `U2H8K3P U9QRST4`)
+   - `collaborators`: remaining arguments — Slack usernames, display names, or member IDs
+     (e.g. `john.doe jane.smith` or `U2H8K3P U9QRST4`); the CLI resolves names to IDs automatically
 
 2. **Capture the current plan.** Ask the user: "Please describe the plan you want to share with the working group, or type 'use current' to use the plan we just discussed." Format the plan as clear markdown.
 

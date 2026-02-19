@@ -177,12 +177,14 @@ The bot token controls what the daemon and CLI are allowed to do in Slack.
    | `im:write` | Open a DM conversation with a collaborator before messaging them |
    | `reactions:read` | Receive ✅ reaction events (collaborator approvals) |
    | `reactions:write` | Add a ✅ reaction on behalf of the bot (owner self-approval) |
+   | `users:read` | Resolve Slack usernames and display names to user IDs |
 
-   After adding all seven scopes the list should look like:
+   After adding all eight scopes the list should look like:
    ```
    groups:write  groups:read  groups:history
    chat:write    im:write
    reactions:read  reactions:write
+   users:read
    ```
 
 ---
@@ -252,7 +254,7 @@ The ID looks like `U0XXXXXXX` or `U01XXXXXXXX` (9–11 characters starting with 
 | `xoxb-...` bot token | Settings → Install App |
 | `U...` your Slack user ID | Your Slack profile |
 | Socket Mode enabled | Settings → Socket Mode → ON |
-| All 7 bot scopes added | Features → OAuth & Permissions |
+| All 8 bot scopes added | Features → OAuth & Permissions |
 | `message.groups` event subscribed | Features → Event Subscriptions |
 | `reaction_added` event subscribed | Features → Event Subscriptions |
 | App installed to workspace | Settings → Install App |
