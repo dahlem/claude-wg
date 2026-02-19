@@ -539,7 +539,7 @@ Skills call these for you; you rarely need to invoke them directly.
 | `plan` | `--channel`, `--plan-file/--plan-text`, `--files`, `--session-dir` | Post a new plan thread in an existing channel |
 | `reply` | `--plan-file/--plan-text`, `--files`, `--channel` (opt), `--thread-ts` (opt), `--session-dir` | Post a revision. Pass `--channel` to bypass session file; `--thread-ts` to disambiguate when you own multiple threads. |
 | `sync` | `--channel` (opt), `--thread-ts` (opt), `--overview`, `--section-ts`, `--session-dir` | Print feedback + current plan text. `--overview` lists sections with feedback counts. `--section-ts <ts>` shows one section's feedback. Pass `--channel` to target any thread from the global registry without a session file. |
-| `approve` | `--channel` (opt), `--thread-ts` (opt), `--session-dir` | Mark plan approved, add ✅ reaction to the latest reply (not the top-level post). |
+| `approve` | `--channel` (opt), `--thread-ts` (opt), `--section-ts` (opt), `--session-dir` | Mark plan approved, add ✅ reaction to the latest reply. Pass `--section-ts` to approve a single section of a multi-section plan. |
 | `status` | `--channel` | Print all threads with feedback counts and conflict warnings |
 | `list` | `--open-only` | List all tracked channels sorted by last activity |
 | `link` | `--channel`, `--thread-ts`, `--session-dir` | Manually link a session to a thread |
