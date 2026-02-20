@@ -492,8 +492,94 @@ def cmd_plan(args) -> None:
     print(f"Session linked to {channel_name}:{thread_ts}")
 
 
+def _heading_label(heading: str) -> str:
+    """Strip Markdown heading markers for display (e.g. '## What You Will Do' → 'What You Will Do')."""
+    m = re.match(r"^#{1,6}\s+(.*)", heading)
+    return m.group(1) if m else heading or "untitled"
+
+
+def _update_plan_sections(
+    channel_id: str,
+    channel_name: str,
+    plan: str,
+    version: int,
+    old_thread: dict,
+) -> tuple[str, list[dict], dict[str, int]]:
+    """Edit a multi-section plan in-place via chat.update / chat_postMessage.
+
+    - Sections matched by heading are edited in-place (chat.update) when content changed.
+    - New sections (heading absent from v-1) are posted as new top-level messages.
+    - Removed sections are left untouched in Slack (feedback threads preserved).
+
+    Updates the anchor message to reflect the new version and posts a
+    changelog reply to the anchor thread.
+
+    Returns (changelog_text, new_sections_list, new_section_index).
+    """
+    new_parsed = parse_sections(plan)
+    old_sections: list[dict] = old_thread.get("sections", [])
+    anchor_ts: str = old_thread["ts"]
+
+    old_by_heading: dict[str, dict] = {s["heading"]: s for s in old_sections}
+    new_headings: set[str] = {heading for heading, _ in new_parsed}
+
+    modified: list[str] = []
+    added: list[str] = []
+    removed: list[str] = [
+        _heading_label(s["heading"])
+        for s in old_sections
+        if s["heading"] not in new_headings
+    ]
+
+    new_sections: list[dict] = []
+    new_section_index: dict[str, int] = {}
+
+    for i, (heading, body) in enumerate(new_parsed):
+        if heading in old_by_heading:
+            old_sec = old_by_heading[heading]
+            sec_ts: str = old_sec["ts"]
+            if body != old_sec["body"]:
+                new_text = format_section_message(heading, body)
+                slack("chat_update", channel=channel_id, ts=sec_ts, text=new_text, mrkdwn=True)
+                modified.append(_heading_label(heading))
+            new_sections.append({**old_sec, "body": body})
+        else:
+            new_text = format_section_message(heading, body)
+            res = slack("chat_postMessage", channel=channel_id, text=new_text, mrkdwn=True)
+            sec_ts = res["ts"]
+            added.append(_heading_label(heading))
+            new_sections.append({
+                "heading": heading,
+                "body": body,
+                "ts": sec_ts,
+                "feedback": [],
+                "approved": False,
+                "approved_by": None,
+            })
+        new_section_index[sec_ts] = i
+
+    # Build changelog
+    parts: list[str] = []
+    if modified:
+        parts.append(f"*Modified:* {', '.join(modified)}")
+    if added:
+        parts.append(f"*Added:* {', '.join(added)}")
+    if removed:
+        parts.append(f"*Removed:* {', '.join(removed)} (messages kept for history)")
+    if not parts:
+        parts.append("No content changes detected.")
+    changelog = "📝 *Changes in v{}:*\n{}".format(version, "\n".join(f"• {p}" for p in parts))
+
+    # Update anchor message and post changelog to its thread
+    new_anchor_text = format_plan_anchor_message(version, channel_name, new_parsed)
+    slack("chat_update", channel=channel_id, ts=anchor_ts, text=new_anchor_text, mrkdwn=True)
+    slack("chat_postMessage", channel=channel_id, text=changelog, thread_ts=anchor_ts, mrkdwn=True)
+
+    return changelog, new_sections, new_section_index
+
+
 def cmd_reply(args) -> None:
-    """Post a revised plan as a reply in the current session's thread."""
+    """Post a revised plan. Multi-section plans are updated in-place; single-message plans get a thread reply."""
     if getattr(args, "channel", None):
         channel_name, thread_ts, state = _resolve_thread(args.channel, getattr(args, "thread_ts", None))
     else:
@@ -516,33 +602,39 @@ def cmd_reply(args) -> None:
     thread = state["threads"].get(thread_ts, {})
     version = thread.get("version", 1) + 1
     plan = read_plan(args.plan_file, args.plan_text)
-    msg = format_plan_message(plan, version, channel_name)
-
     channel_id = state["channel_id"]
-    res = slack("chat_postMessage",
-                channel=channel_id,
-                text=msg,
-                thread_ts=thread_ts,
-                mrkdwn=True)
-    reply_ts = res["ts"]
-
-    # Update files if provided
     files = parse_files(getattr(args, "files", None))
+
+    if thread.get("sections"):
+        # Multi-section plan: edit section messages in-place
+        changelog, new_sections, new_section_index = _update_plan_sections(
+            channel_id, channel_name, plan, version, thread
+        )
+        thread["sections"] = new_sections
+        thread["section_index"] = new_section_index
+        print(changelog)
+    else:
+        # Single-message plan: post revision as thread reply
+        msg = format_plan_message(plan, version, channel_name)
+        res = slack("chat_postMessage",
+                    channel=channel_id,
+                    text=msg,
+                    thread_ts=thread_ts,
+                    mrkdwn=True)
+        thread["latest_reply_ts"] = res["ts"]
+
     if files:
         thread["files"] = files
 
-    # Append to plan_versions
     plan_versions = thread.get("plan_versions", [])
-    plan_versions.append({"version": version, "text": plan, "posted_at": now_iso(), "ts": reply_ts})
+    plan_versions.append({"version": version, "text": plan, "posted_at": now_iso()})
     thread["plan_versions"] = plan_versions
-
     thread["version"] = version
-    thread["latest_reply_ts"] = reply_ts
     thread["status"] = "awaiting_feedback"
     state["threads"][thread_ts] = thread
     save_channel_state(channel_name, state)
 
-    print(f"Plan v{version} posted to thread {thread_ts}")
+    print(f"Plan v{version} applied to thread {thread_ts}")
 
 
 def cmd_sync(args) -> None:
@@ -911,7 +1003,7 @@ def cmd_approve(args) -> None:
                   channel=state["channel_id"],
                   name="white_check_mark",
                   timestamp=section_ts_arg)
-        except Exception as e:
+        except BaseException as e:
             print(f"Warning: could not add reaction: {e}", file=sys.stderr)
         heading = section.get("heading", "")
         hm = re.match(r"^#{1,6}\s+(.*)", heading)
@@ -933,7 +1025,7 @@ def cmd_approve(args) -> None:
               channel=state["channel_id"],
               name="white_check_mark",
               timestamp=reaction_ts)
-    except Exception as e:
+    except BaseException as e:
         print(f"Warning: could not add reaction: {e}", file=sys.stderr)
 
     version = thread.get("version", 1)
